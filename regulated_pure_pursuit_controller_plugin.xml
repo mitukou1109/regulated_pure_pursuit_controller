@@ -1,0 +1,9 @@
+<library path="lib/libregulated_pure_pursuit_controller">
+  <class name="regulated_pure_pursuit_controller/RegulatedPurePursuitController"
+    type="regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+    base_class_type="nav_core::BaseLocalPlanner">
+    <description>
+      Local planner plugin implementing Regulated Pure Pursuit
+    </description>
+  </class>
+</library>
