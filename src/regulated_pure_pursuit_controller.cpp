@@ -76,7 +76,8 @@ namespace regulated_pure_pursuit_controller
         (std::pow(max_vel_linear_, 2) - std::pow(min_vel_linear_, 2)) / (2 * acc_lim_linear_);
 
     std::vector<tf2::Transform> transformed_path;
-    tf2::Transform lookahead_tf;
+    auto goal_tf = robot_base_to_global_tf * global_plan_.back();
+    auto lookahead_tf = goal_tf;
     for (auto itr = closest_point; itr != global_plan_.end(); itr++)
     {
       const auto &pose = *itr;
@@ -91,16 +92,17 @@ namespace regulated_pure_pursuit_controller
       }
     }
 
-    auto goal_error = robot_base_to_global_tf * global_plan_.back();
-    double vel_linear = 0;
-
-    if (goal_error.getOrigin().length() <= approach_velocity_scaling_dist)
+    double vel_linear;
+    if (goal_tf.getOrigin().length() <= approach_velocity_scaling_dist)
     {
-      if (goal_error.getOrigin().length() <= xy_goal_tolerance_ &&
-          std::abs(tf2::getYaw(goal_error.getRotation())) <= yaw_goal_tolerance_)
+      if (goal_tf.getOrigin().length() <= xy_goal_tolerance_)
       {
-        has_reached_goal_ = true;
-        return true;
+        vel_linear = 0;
+        if (std::abs(tf2::getYaw(goal_tf.getRotation())) <= yaw_goal_tolerance_)
+        {
+          has_reached_goal_ = true;
+          return true;
+        }
       }
       else
       {
