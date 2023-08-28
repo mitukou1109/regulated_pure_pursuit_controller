@@ -183,8 +183,6 @@ namespace regulated_pure_pursuit_controller
 
       local_plan_pub_ = pnh.advertise<nav_msgs::Path>("local_plan", 1);
 
-      odom_sub_ = pnh.subscribe("odom", 1, &RegulatedPurePursuitController::odomCallback, this);
-
       pnh.param("acc_lim_linear", acc_lim_linear_, 2.5);
       pnh.param("min_vel_linear", min_vel_linear_, 0.1);
       pnh.param("max_vel_linear", max_vel_linear_, 0.5);
@@ -213,15 +211,17 @@ namespace regulated_pure_pursuit_controller
 
       pnh.param("transform_tolerance", transform_tolerance_, 0.1);
 
-      reconfigure_server_ = std::make_shared<decltype(reconfigure_server_)::element_type>(pnh);
-      reconfigure_server_->setCallback(
-          boost::bind(&RegulatedPurePursuitController::reconfigureCB, this, _1, _2));
+      ros::NodeHandle nh;
+      odom_sub_ = nh.subscribe("odom", 1, &RegulatedPurePursuitController::odomCallback, this);
 
       ros::NodeHandle move_base_nh("~");
-
       double controller_frequency;
       move_base_nh.param("controller_frequency", controller_frequency, 20.0);
       control_period_ = 1 / controller_frequency;
+
+      reconfigure_server_ = std::make_shared<decltype(reconfigure_server_)::element_type>(pnh);
+      reconfigure_server_->setCallback(
+          boost::bind(&RegulatedPurePursuitController::reconfigureCB, this, _1, _2));
 
       is_initialized_ = true;
     }
