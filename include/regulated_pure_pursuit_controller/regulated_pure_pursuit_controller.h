@@ -21,7 +21,7 @@ namespace regulated_pure_pursuit_controller
 
     bool computeVelocityCommands(geometry_msgs::Twist &cmd_vel) override;
 
-    bool isGoalReached() override { return is_goal_reached_; }
+    bool isGoalReached() override { return has_reached_goal_; }
 
     bool setPlan(const std::vector<geometry_msgs::PoseStamped> &plan) override;
 
@@ -78,11 +78,11 @@ namespace regulated_pure_pursuit_controller
 
     double transform_tolerance_;
 
-    double controller_frequency_;
+    double control_period_;
 
     bool is_initialized_;
 
-    bool is_goal_reached_;
+    bool has_reached_goal_;
   };
 
 } // namespace regulated_pure_pursuit_controller

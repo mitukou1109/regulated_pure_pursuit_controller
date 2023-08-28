@@ -12,7 +12,7 @@ PLUGINLIB_EXPORT_CLASS(regulated_pure_pursuit_controller::RegulatedPurePursuitCo
 namespace regulated_pure_pursuit_controller
 {
   RegulatedPurePursuitController::RegulatedPurePursuitController()
-      : is_initialized_(false), is_goal_reached_(false)
+      : is_initialized_(false), has_reached_goal_(false)
   {
   }
 
@@ -54,8 +54,8 @@ namespace regulated_pure_pursuit_controller
         global_plan_.begin(), global_plan_.end(),
         [&](const tf2::Transform &a, const tf2::Transform &b)
         {
-          return (robot_base_to_global_tf.getOrigin() + a.getOrigin()).length() <
-                 (robot_base_to_global_tf.getOrigin() + b.getOrigin()).length();
+          return (robot_base_to_global_tf * a).getOrigin().length() <
+                 (robot_base_to_global_tf * b).getOrigin().length();
         });
 
     double current_vel_linear = std::hypot(odom_.twist.twist.linear.x, odom_.twist.twist.linear.y);
@@ -91,38 +91,40 @@ namespace regulated_pure_pursuit_controller
       }
     }
 
-    double desired_vel_linear = max_vel_linear_;
     auto goal_error = robot_base_to_global_tf * global_plan_.back();
+    double vel_linear = 0;
 
     if (goal_error.getOrigin().length() <= approach_velocity_scaling_dist)
     {
       if (goal_error.getOrigin().length() <= xy_goal_tolerance_ &&
-          goal_error.getRotation().getAngle() <= yaw_goal_tolerance_)
+          std::abs(tf2::getYaw(goal_error.getRotation())) <= yaw_goal_tolerance_)
       {
-        is_goal_reached_ = true;
-        cmd_vel.linear.x = cmd_vel.linear.y = cmd_vel.angular.z = 0.0;
+        has_reached_goal_ = true;
         return true;
       }
       else
       {
-        desired_vel_linear = min_vel_linear_;
+        vel_linear = std::max(current_vel_linear - acc_lim_linear_ * control_period_,
+                              min_vel_linear_);
       }
     }
-
-    double vel_linear_error = desired_vel_linear - current_vel_linear;
-    double vel_linear =
-        current_vel_linear + std::copysign(std::min(std::abs(vel_linear_error),
-                                                    acc_lim_linear_ * controller_frequency_),
-                                           vel_linear_error);
+    else
+    {
+      vel_linear = std::min(current_vel_linear + acc_lim_linear_ * control_period_,
+                            max_vel_linear_);
+    }
 
     tf2::Vector3 cmd_vel_linear = vel_linear * lookahead_tf.getOrigin().normalized();
 
-    double desired_vel_angular = lookahead_tf.getRotation().getAngle() / controller_frequency_;
+    double desired_vel_angular = tf2::getYaw(lookahead_tf.getRotation()) / control_period_;
     double vel_angular_error = desired_vel_angular - current_vel_angular;
     double cmd_vel_angular =
         current_vel_angular + std::copysign(std::min(std::abs(vel_angular_error),
-                                                     acc_lim_angular_ * controller_frequency_),
+                                                     acc_lim_angular_ * control_period_),
                                             vel_angular_error);
+    cmd_vel_angular = std::copysign(std::clamp(std::abs(cmd_vel_angular),
+                                               min_vel_angular_, max_vel_angular_),
+                                    cmd_vel_angular);
 
     cmd_vel.linear = tf2::toMsg(cmd_vel_linear);
     cmd_vel.angular.z = cmd_vel_angular;
@@ -163,6 +165,8 @@ namespace regulated_pure_pursuit_controller
       tf2::fromMsg(pose_msg.pose, pose);
       global_plan_.push_back(pose);
     }
+
+    has_reached_goal_ = false;
 
     return true;
   }
@@ -215,7 +219,9 @@ namespace regulated_pure_pursuit_controller
 
       ros::NodeHandle move_base_nh("~");
 
-      move_base_nh.param("controller_frequency", controller_frequency_, 20.0);
+      double controller_frequency;
+      move_base_nh.param("controller_frequency", controller_frequency, 20.0);
+      control_period_ = 1 / controller_frequency;
 
       is_initialized_ = true;
     }
