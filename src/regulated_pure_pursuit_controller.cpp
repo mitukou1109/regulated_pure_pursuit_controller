@@ -58,13 +58,14 @@ namespace regulated_pure_pursuit_controller
                  (robot_base_to_global_tf * b).getOrigin().length();
         });
 
-    double current_vel_linear = std::hypot(odom_.twist.twist.linear.x, odom_.twist.twist.linear.y);
+    tf2::Vector3 current_vel_linear;
+    tf2::fromMsg(odom_.twist.twist.linear, current_vel_linear);
     double current_vel_angular = odom_.twist.twist.angular.z;
 
     double lookahead_dist;
     if (use_velocity_scaled_lookahead_dist_)
     {
-      lookahead_dist = std::clamp(current_vel_linear * lookahead_time_,
+      lookahead_dist = std::clamp(current_vel_linear.length() * lookahead_time_,
                                   min_lookahead_dist_, max_lookahead_dist_);
     }
     else
@@ -106,17 +107,105 @@ namespace regulated_pure_pursuit_controller
       }
       else
       {
-        vel_linear = std::max(current_vel_linear - acc_lim_linear_ * control_period_,
-                              min_vel_linear_);
+        vel_linear = current_vel_linear.length() - acc_lim_linear_ * control_period_;
       }
     }
     else
     {
-      vel_linear = std::min(current_vel_linear + acc_lim_linear_ * control_period_,
-                            max_vel_linear_);
+      vel_linear = current_vel_linear.length() + acc_lim_linear_ * control_period_;
+
+      if (use_curvature_heuristic_ || use_proximity_heuristic_)
+      {
+        double vel_linear_curvature = vel_linear;
+        double vel_linear_proximity = vel_linear;
+
+        if (use_curvature_heuristic_)
+        {
+          auto lookahead_point_wrt_moving_direction =
+              lookahead_tf.getOrigin().rotate({0, 0, 1}, current_vel_linear.angle({1, 0, 0}));
+          double curvature =
+              2 * std::abs(lookahead_point_wrt_moving_direction.y()) / std::pow(lookahead_dist, 2);
+          if (curvature >= curvature_threshold_)
+          {
+            vel_linear_curvature = vel_linear * curvature_gain_ / (curvature / curvature_threshold_);
+          }
+        }
+        else
+        {
+          vel_linear_curvature = 0;
+        }
+
+        if (use_proximity_heuristic_)
+        {
+          using CostmapPoints = std::vector<costmap_2d::MapLocation>;
+
+          auto costmap = costmap_ros_->getCostmap();
+
+          CostmapPoints footprint;
+          std::vector<geometry_msgs::Point> raw_footprint;
+          costmap_ros_->getOrientedFootprint(raw_footprint);
+          for (const auto &raw_point : raw_footprint)
+          {
+            costmap_2d::MapLocation point;
+            if (costmap->worldToMap(raw_point.x, raw_point.y, point.x, point.y))
+            {
+              footprint.push_back(point);
+            }
+          }
+
+          CostmapPoints cells_in_footprint;
+          costmap->convexFillCells(footprint, cells_in_footprint);
+
+          if (!cells_in_footprint.empty())
+          {
+            double distance_to_obstacle = INFINITY;
+            for (unsigned int mx = 0; mx < costmap->getSizeInCellsX(); mx++)
+            {
+              for (unsigned int my = 0; my < costmap->getSizeInCellsY(); my++)
+              {
+                if (std::none_of(cells_in_footprint.cbegin(), cells_in_footprint.cend(),
+                                 [&](const costmap_2d::MapLocation &cell)
+                                 { return cell.x == mx && cell.y == my; }))
+                {
+                  if (costmap->getCost(mx, my) >= costmap_2d::LETHAL_OBSTACLE)
+                  {
+                    auto closest_point_to_obstacle = *std::min_element(
+                        cells_in_footprint.cbegin(), cells_in_footprint.cend(),
+                        [&](const costmap_2d::MapLocation &a, const costmap_2d::MapLocation &b)
+                        { return std::hypot(static_cast<double>(a.x) - mx,
+                                            static_cast<double>(a.y) - my) <
+                                 std::hypot(static_cast<double>(b.x) - mx,
+                                            static_cast<double>(b.y) - my); });
+
+                    distance_to_obstacle =
+                        std::min(
+                            distance_to_obstacle,
+                            std::hypot(static_cast<double>(closest_point_to_obstacle.x) - mx,
+                                       static_cast<double>(closest_point_to_obstacle.y) - my) *
+                                costmap->getResolution());
+                  }
+                }
+              }
+            }
+
+            if (distance_to_obstacle <= proximity_threshold_)
+            {
+              vel_linear_proximity =
+                  vel_linear * proximity_gain_ * distance_to_obstacle / proximity_threshold_;
+            }
+          }
+        }
+        else
+        {
+          vel_linear_proximity = 0;
+        }
+
+        vel_linear = std::max(vel_linear_curvature, vel_linear_proximity);
+      }
     }
 
-    tf2::Vector3 cmd_vel_linear = vel_linear * lookahead_tf.getOrigin().normalized();
+    tf2::Vector3 cmd_vel_linear = std::clamp(vel_linear, min_vel_linear_, max_vel_linear_) *
+                                  lookahead_tf.getOrigin().normalized();
 
     double desired_vel_angular = tf2::getYaw(lookahead_tf.getRotation()) / control_period_;
     double vel_angular_error = desired_vel_angular - current_vel_angular;
@@ -205,6 +294,7 @@ namespace regulated_pure_pursuit_controller
       pnh.param("lookahead_time", lookahead_time_, 1.5);
 
       pnh.param("use_curvature_heuristic", use_curvature_heuristic_, true);
+      pnh.param("curvature_gain", curvature_gain_, 1.0);
       pnh.param("curvature_threshold", curvature_threshold_, 1.1);
 
       pnh.param("use_proximity_heuristic", use_proximity_heuristic_, true);
@@ -256,6 +346,7 @@ namespace regulated_pure_pursuit_controller
     lookahead_time_ = config.lookahead_time;
 
     use_curvature_heuristic_ = config.use_curvature_heuristic;
+    curvature_gain_ = config.curvature_gain;
     curvature_threshold_ = config.curvature_threshold;
 
     use_proximity_heuristic_ = config.use_proximity_heuristic;

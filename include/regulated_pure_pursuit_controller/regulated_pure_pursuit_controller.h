@@ -70,6 +70,7 @@ namespace regulated_pure_pursuit_controller
     double lookahead_time_;
 
     bool use_curvature_heuristic_;
+    double curvature_gain_;
     double curvature_threshold_;
 
     bool use_proximity_heuristic_;
