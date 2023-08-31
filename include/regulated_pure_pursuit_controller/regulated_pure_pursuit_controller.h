@@ -29,6 +29,9 @@ namespace regulated_pure_pursuit_controller
                     costmap_2d::Costmap2DROS *costmap_ros) override;
 
   private:
+    double getPathLength(const std::vector<tf2::Transform>::const_iterator &start,
+                         const std::vector<tf2::Transform>::const_iterator &end);
+
     void odomCallback(const nav_msgs::Odometry &odom) { odom_ = odom; }
 
     void reconfigureCB(RegulatedPurePursuitControllerConfig &config, uint32_t level);
@@ -59,6 +62,9 @@ namespace regulated_pure_pursuit_controller
     double max_vel_angular_;
 
     bool is_omnidirectional_;
+    bool follow_viapoint_orientation_;
+    bool use_rotate_to_heading_;
+    double rotate_to_heading_angular_vel_;
 
     double xy_goal_tolerance_;
     double yaw_goal_tolerance_;
@@ -84,6 +90,10 @@ namespace regulated_pure_pursuit_controller
     bool is_initialized_;
 
     bool has_reached_goal_;
+
+    bool is_rotating_to_goal_orientation_;
+
+    bool should_prerotate_;
   };
 
 } // namespace regulated_pure_pursuit_controller

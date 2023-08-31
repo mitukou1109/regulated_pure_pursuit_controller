@@ -12,9 +12,10 @@ PLUGINLIB_EXPORT_CLASS(regulated_pure_pursuit_controller::RegulatedPurePursuitCo
 namespace regulated_pure_pursuit_controller
 {
   RegulatedPurePursuitController::RegulatedPurePursuitController()
-      : is_initialized_(false), has_reached_goal_(false)
-  {
-  }
+      : is_initialized_(false),
+        has_reached_goal_(false),
+        is_rotating_to_goal_orientation_(false),
+        should_prerotate_(false) {}
 
   RegulatedPurePursuitController::RegulatedPurePursuitController(
       std::string name, tf2_ros::Buffer *tf, costmap_2d::Costmap2DROS *costmap_ros)
@@ -93,21 +94,34 @@ namespace regulated_pure_pursuit_controller
       }
     }
 
+    auto lookahead_point_wrt_moving_direction =
+        lookahead_tf.getOrigin().rotate({0, 0, 1}, current_vel_linear.angle({1, 0, 0}));
+    double curvature =
+        2 * lookahead_point_wrt_moving_direction.y() / std::pow(lookahead_dist, 2);
+
     double vel_linear;
-    if (goal_tf.getOrigin().length() <= approach_velocity_scaling_dist)
+    if (getPathLength(closest_point, global_plan_.cend()) <= approach_velocity_scaling_dist)
     {
+      vel_linear = current_vel_linear.length() - acc_lim_linear_ * control_period_;
       if (goal_tf.getOrigin().length() <= xy_goal_tolerance_)
       {
-        vel_linear = 0;
-        if (std::abs(tf2::getYaw(goal_tf.getRotation())) <= yaw_goal_tolerance_)
+        if (is_omnidirectional_ || (!is_omnidirectional_ && use_rotate_to_heading_))
+        {
+          if (std::abs(tf2::getYaw(goal_tf.getRotation())) <= yaw_goal_tolerance_)
+          {
+            has_reached_goal_ = true;
+            return true;
+          }
+          else
+          {
+            is_rotating_to_goal_orientation_ = true;
+          }
+        }
+        else
         {
           has_reached_goal_ = true;
           return true;
         }
-      }
-      else
-      {
-        vel_linear = current_vel_linear.length() - acc_lim_linear_ * control_period_;
       }
     }
     else
@@ -121,13 +135,10 @@ namespace regulated_pure_pursuit_controller
 
         if (use_curvature_heuristic_)
         {
-          auto lookahead_point_wrt_moving_direction =
-              lookahead_tf.getOrigin().rotate({0, 0, 1}, current_vel_linear.angle({1, 0, 0}));
-          double curvature =
-              2 * std::abs(lookahead_point_wrt_moving_direction.y()) / std::pow(lookahead_dist, 2);
-          if (curvature >= curvature_threshold_)
+          if (std::abs(curvature) >= curvature_threshold_)
           {
-            vel_linear_curvature = vel_linear * curvature_gain_ / (curvature / curvature_threshold_);
+            vel_linear_curvature =
+                vel_linear * curvature_gain_ / (std::abs(curvature) / curvature_threshold_);
           }
         }
         else
@@ -204,34 +215,110 @@ namespace regulated_pure_pursuit_controller
       }
     }
 
-    tf2::Vector3 cmd_vel_linear = std::clamp(vel_linear, min_vel_linear_, max_vel_linear_) *
-                                  lookahead_tf.getOrigin().normalized();
-
-    double desired_vel_angular = tf2::getYaw(lookahead_tf.getRotation()) / control_period_;
-    double vel_angular_error = desired_vel_angular - current_vel_angular;
-    double cmd_vel_angular =
-        current_vel_angular + std::copysign(std::min(std::abs(vel_angular_error),
-                                                     acc_lim_angular_ * control_period_),
-                                            vel_angular_error);
-    cmd_vel_angular = std::copysign(std::clamp(std::abs(cmd_vel_angular),
-                                               min_vel_angular_, max_vel_angular_),
-                                    cmd_vel_angular);
-
-    cmd_vel.linear = tf2::toMsg(cmd_vel_linear);
-    cmd_vel.angular.z = cmd_vel_angular;
+    tf2::Vector3 cmd_vel_linear;
+    double cmd_vel_angular;
 
     nav_msgs::Path local_plan;
     local_plan.header.frame_id = global_frame_;
     local_plan.header.stamp = ros::Time::now();
 
-    geometry_msgs::PoseStamped pose;
-    pose.header.frame_id = global_frame_;
-    pose.header.stamp = ros::Time::now();
-    tf2::toMsg(robot_base_to_global_tf.inverse(), pose.pose);
-    local_plan.poses.push_back(pose);
+    if (should_prerotate_)
+    {
+      auto path_direction_wrt_moving_direction =
+          transformed_path.at(1).getOrigin() - transformed_path.at(0).getOrigin();
+      double yaw_difference = std::atan2(path_direction_wrt_moving_direction.y(),
+                                         path_direction_wrt_moving_direction.x());
 
-    tf2::toMsg(robot_base_to_global_tf.inverse() * lookahead_tf, pose.pose);
-    local_plan.poses.push_back(pose);
+      if (std::abs(yaw_difference) <= M_PI / 12)
+      {
+        should_prerotate_ = false;
+      }
+      else
+      {
+        cmd_vel_linear = {0, 0, 0};
+        cmd_vel_angular = std::copysign(rotate_to_heading_angular_vel_, yaw_difference);
+      }
+    }
+    else if (is_rotating_to_goal_orientation_)
+    {
+      cmd_vel_linear = {0, 0, 0};
+      cmd_vel_angular = std::copysign(rotate_to_heading_angular_vel_,
+                                      tf2::getYaw(goal_tf.getRotation()));
+    }
+    else if (is_omnidirectional_)
+    {
+      cmd_vel_linear = std::clamp(vel_linear, min_vel_linear_, max_vel_linear_) *
+                       lookahead_tf.getOrigin().normalized();
+
+      double desired_vel_angular;
+      if (follow_viapoint_orientation_)
+      {
+        desired_vel_angular = tf2::getYaw(lookahead_tf.getRotation()) / control_period_;
+      }
+      else
+      {
+        desired_vel_angular = tf2::getYaw(goal_tf.getRotation()) *
+                              cmd_vel_linear.length() * control_period_ /
+                              getPathLength(closest_point, global_plan_.cend());
+      }
+
+      double vel_angular_error = desired_vel_angular - current_vel_angular;
+      cmd_vel_angular = current_vel_angular +
+                        std::copysign(std::min(std::abs(vel_angular_error),
+                                               acc_lim_angular_ * control_period_),
+                                      vel_angular_error);
+      cmd_vel_angular = std::copysign(std::clamp(std::abs(cmd_vel_angular),
+                                                 min_vel_angular_, max_vel_angular_),
+                                      cmd_vel_angular);
+
+      geometry_msgs::PoseStamped pose;
+      pose.header.frame_id = global_frame_;
+      pose.header.stamp = ros::Time::now();
+
+      tf2::toMsg(robot_base_to_global_tf.inverse(), pose.pose);
+      local_plan.poses.push_back(pose);
+
+      tf2::toMsg(robot_base_to_global_tf.inverse() * lookahead_tf, pose.pose);
+      local_plan.poses.push_back(pose);
+    }
+    else
+    {
+      cmd_vel_linear.setX(std::clamp(vel_linear, min_vel_linear_, max_vel_linear_));
+      cmd_vel_angular = vel_linear * curvature;
+      cmd_vel_angular = std::copysign(std::clamp(std::abs(cmd_vel_angular),
+                                                 min_vel_angular_, max_vel_angular_),
+                                      cmd_vel_angular);
+
+      double arc_radius = std::abs(1 / curvature);
+      auto arc_origin =
+          robot_base_to_global_tf.inverse() *
+          tf2::Transform({{0, 0, 1}, -M_PI_2},
+                         transformed_path.front().getOrigin() + tf2::Vector3(0, arc_radius, 0));
+      auto arc_end_vector =
+          (arc_origin.inverse() * robot_base_to_global_tf.inverse() * lookahead_tf)
+              .getOrigin();
+      double arc_center_angle = std::atan2(arc_end_vector.y(), arc_end_vector.x());
+
+      geometry_msgs::PoseStamped pose;
+      pose.header.frame_id = global_frame_;
+      pose.header.stamp = ros::Time::now();
+
+      for (int i = 0; i * M_PI / 12 <= std::abs(arc_center_angle); i++)
+      {
+        double theta = std::copysign(i * M_PI / 12, arc_center_angle);
+        auto arc_pose = arc_origin * tf2::Transform({{0, 0, 1}, theta},
+                                                    {arc_radius * std::cos(theta),
+                                                     arc_radius * std::sin(theta),
+                                                     0});
+        tf2::toMsg(arc_pose, pose.pose);
+        local_plan.poses.push_back(pose);
+      }
+      tf2::toMsg(robot_base_to_global_tf.inverse() * lookahead_tf, pose.pose);
+      local_plan.poses.push_back(pose);
+    }
+
+    cmd_vel.linear = tf2::toMsg(cmd_vel_linear);
+    cmd_vel.angular.z = cmd_vel_angular;
 
     local_plan_pub_.publish(local_plan);
 
@@ -258,6 +345,13 @@ namespace regulated_pure_pursuit_controller
     }
 
     has_reached_goal_ = false;
+    is_rotating_to_goal_orientation_ = false;
+
+    auto start_direction = (global_plan_.at(0).inverse() * global_plan_.at(1)).getOrigin();
+    double start_yaw = std::atan2(start_direction.y(), start_direction.x());
+    should_prerotate_ =
+        (!is_omnidirectional_ && use_rotate_to_heading_ &&
+         (std::abs(start_yaw - tf2::getYaw(odom_.pose.pose.orientation)) >= M_PI_4));
 
     return true;
   }
@@ -283,6 +377,9 @@ namespace regulated_pure_pursuit_controller
       pnh.param("max_vel_angular", max_vel_angular_, 1.0);
 
       pnh.param("is_omnidirectional", is_omnidirectional_, true);
+      pnh.param("follow_viapoint_orientation", follow_viapoint_orientation_, true);
+      pnh.param("use_rotate_to_heading", use_rotate_to_heading_, true);
+      pnh.param("rotate_to_heading_angular_vel", rotate_to_heading_angular_vel_, 0.5);
 
       pnh.param("xy_goal_tolerance", xy_goal_tolerance_, 0.25);
       pnh.param("yaw_goal_tolerance", yaw_goal_tolerance_, 0.25);
@@ -323,6 +420,18 @@ namespace regulated_pure_pursuit_controller
     }
   }
 
+  double RegulatedPurePursuitController::getPathLength(
+      const std::vector<tf2::Transform>::const_iterator &start,
+      const std::vector<tf2::Transform>::const_iterator &end)
+  {
+    double length = 0;
+    for (auto itr = std::next(start); itr != end; itr++)
+    {
+      length += std::prev(itr)->getOrigin().distance(itr->getOrigin());
+    }
+    return length;
+  }
+
   void RegulatedPurePursuitController::reconfigureCB(RegulatedPurePursuitControllerConfig &config,
                                                      uint32_t level)
   {
@@ -335,6 +444,9 @@ namespace regulated_pure_pursuit_controller
     max_vel_angular_ = config.max_vel_angular;
 
     is_omnidirectional_ = config.is_omnidirectional;
+    follow_viapoint_orientation_ = config.follow_viapoint_orientation;
+    use_rotate_to_heading_ = config.use_rotate_to_heading;
+    rotate_to_heading_angular_vel_ = config.rotate_to_heading_angular_vel;
 
     xy_goal_tolerance_ = config.xy_goal_tolerance;
     yaw_goal_tolerance_ = config.yaw_goal_tolerance;
