@@ -1,6 +1,6 @@
 # regulated_pure_pursuit_controller
 
-This is an implementation of Pure Pursuit Control algorithm [1].
+This is an implementation of Pure Pursuit Control algorithm [1] for ROS Noetic.
 Most of the parameters correspond to those of [nav2 implementation](https://github.com/ros-planning/navigation2/tree/main/nav2_regulated_pure_pursuit_controller).
 
 # Topics
